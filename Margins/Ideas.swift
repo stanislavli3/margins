@@ -1,9 +1,9 @@
 import SwiftUI
 import AppKit
 
-// Ideas are the #hashtags written in highlight notes ("#focus", "#привычки").
-// They are worked out from the notes every time and never stored, so
-// library.json keeps exactly the same shape as before.
+// An idea is a short name attached to a highlight, like a tag in Finder.
+// Ideas are added with the idea picker (stored in Highlight.tags); a #hashtag
+// typed in a note counts as one too.
 
 enum IdeaParser {
     private static let pattern = try? NSRegularExpression(pattern: "#([\\p{L}\\p{N}_-]+)")
@@ -20,10 +20,50 @@ enum IdeaParser {
         }
         return result
     }
+
+    /// "  #Deep Focus " -> "deep focus"
+    static func normalize(_ raw: String) -> String {
+        var name = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        while name.hasPrefix("#") { name.removeFirst() }
+        return name.trimmingCharacters(in: .whitespaces)
+    }
+
+    /// Removes "#name" from a note.
+    static func strip(_ name: String, from note: String) -> String {
+        let escaped = NSRegularExpression.escapedPattern(for: name)
+        guard let regex = try? NSRegularExpression(
+            pattern: "\\s?#" + escaped + "(?![\\p{L}\\p{N}_-])",
+            options: [.caseInsensitive]
+        ) else { return note }
+        let range = NSRange(note.startIndex..., in: note)
+        return regex.stringByReplacingMatches(in: note, range: range, withTemplate: "")
+            .trimmingCharacters(in: .whitespaces)
+    }
 }
 
 extension Highlight {
-    var ideas: [String] { IdeaParser.ideas(in: note) }
+    /// Every idea on this highlight: picked ones first, then hashtags from the note.
+    var ideas: [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        for name in tags.map({ IdeaParser.normalize($0) }) + IdeaParser.ideas(in: note)
+        where !name.isEmpty && seen.insert(name).inserted {
+            result.append(name)
+        }
+        return result
+    }
+
+    mutating func addIdea(_ raw: String) {
+        let name = IdeaParser.normalize(raw)
+        guard !name.isEmpty, !ideas.contains(name) else { return }
+        tags.append(name)
+    }
+
+    mutating func removeIdea(_ raw: String) {
+        let name = IdeaParser.normalize(raw)
+        tags.removeAll { IdeaParser.normalize($0) == name }
+        note = IdeaParser.strip(name, from: note)
+    }
 }
 
 /// One highlight together with the book it came from.
@@ -101,7 +141,7 @@ struct IdeaView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 26) {
                     VStack(alignment: .leading, spacing: 6) {
-                        Text("#\(name)")
+                        Text(name.capitalized)
                             .font(.system(size: 28, weight: .bold, design: .serif))
                         Text("\(passages.count) \(passages.count == 1 ? "passage" : "passages") in \(bookIDs.count) \(bookIDs.count == 1 ? "book" : "books")")
                             .font(.system(size: 13))
@@ -109,7 +149,7 @@ struct IdeaView: View {
                     }
 
                     if passages.isEmpty {
-                        Text("No passages yet. Type #\(name) in a highlight's note to add one.")
+                        Text("No passages yet. Add this idea to a highlight to see it here.")
                             .font(.system(size: 14))
                             .foregroundStyle(.secondary)
                     }
@@ -236,7 +276,7 @@ struct IdeaView: View {
     }
 
     private func markdown(_ passages: [Passage], bookIDs: [UUID]) -> String {
-        var out = "# #\(name)\n\n"
+        var out = "# \(name.capitalized)\n\n"
         for bookID in bookIDs {
             let items = passages.filter { $0.book.id == bookID }
             guard let first = items.first else { continue }
@@ -296,7 +336,7 @@ struct IdeaGraph {
 
         for (idea, bookIDs) in ideaBooks.sorted(by: { $0.key < $1.key }) {
             position["idea:" + idea] = graph.nodes.count
-            graph.nodes.append(GraphNode(id: "idea:" + idea, label: "#" + idea, idea: idea, weight: bookIDs.count))
+            graph.nodes.append(GraphNode(id: "idea:" + idea, label: idea, idea: idea, weight: bookIDs.count))
         }
 
         func link(_ first: Int, _ second: Int, betweenIdeas: Bool) {
@@ -405,7 +445,7 @@ struct IdeasView: View {
                 ContentUnavailableView {
                     Label("No Ideas Yet", systemImage: "point.3.connected.trianglepath.dotted")
                 } description: {
-                    Text("Type a hashtag such as #focus in a highlight's note. Passages that share an idea are connected here, across all your books.")
+                    Text("Click Add Idea under any highlight. Passages that share an idea are connected here, across all your books.")
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -418,7 +458,7 @@ struct IdeasView: View {
                             openIdea = IdeaRef(name: summary.name)
                         } label: {
                             VStack(alignment: .leading, spacing: 2) {
-                                Text("#\(summary.name)")
+                                Text(summary.name)
                                     .font(.system(size: 13, weight: .medium))
                                 Text("\(summary.passages) \(summary.passages == 1 ? "passage" : "passages") · \(summary.books) \(summary.books == 1 ? "book" : "books")")
                                     .font(.system(size: 11))
@@ -438,7 +478,7 @@ struct IdeasView: View {
 
             Divider()
             HStack {
-                Text("Ideas come from the #hashtags in your notes.")
+                Text("Click an idea to see everything you've marked under it.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                 Spacer()
@@ -523,4 +563,239 @@ struct IdeasView: View {
                 .frame(maxWidth: 130)
         }
     }
+}
+
+// MARK: - Idea tags on a highlight
+
+/// Lays pills out left to right and wraps them onto new lines.
+struct FlowLayout: Layout {
+    var spacing: CGFloat = 6
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let width = proposal.width ?? .infinity
+        var x: CGFloat = 0
+        var y: CGFloat = 0
+        var rowHeight: CGFloat = 0
+        var widest: CGFloat = 0
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            if x > 0 && x + size.width > width {
+                x = 0
+                y += rowHeight + spacing
+                rowHeight = 0
+            }
+            x += size.width + spacing
+            rowHeight = max(rowHeight, size.height)
+            widest = max(widest, x - spacing)
+        }
+        return CGSize(width: widest, height: y + rowHeight)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var x = bounds.minX
+        var y = bounds.minY
+        var rowHeight: CGFloat = 0
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            if x > bounds.minX && x + size.width > bounds.maxX {
+                x = bounds.minX
+                y += rowHeight + spacing
+                rowHeight = 0
+            }
+            subview.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(size))
+            x += size.width + spacing
+            rowHeight = max(rowHeight, size.height)
+        }
+    }
+}
+
+/// The row of idea pills under a highlight's note, with an Add Idea button.
+struct IdeaTagsRow: View {
+    let echoes: [Echo]
+    /// Every idea in the library, most recently used first.
+    let allIdeas: [String]
+    let showSuggestions: Bool
+    let toggle: (String) -> Void
+    let open: (String) -> Void
+
+    @State private var picking = false
+
+    var body: some View {
+        let attached = Set(echoes.map { $0.name })
+        let suggestions = showSuggestions ? Array(allIdeas.filter { !attached.contains($0) }.prefix(3)) : []
+
+        FlowLayout(spacing: 6) {
+            ForEach(echoes) { echo in
+                Button {
+                    open(echo.name)
+                } label: {
+                    HStack(spacing: 4) {
+                        Text(echo.name)
+                        if echo.others > 0 {
+                            Text("\(echo.others + 1)")
+                                .foregroundStyle(Color.accentColor.opacity(0.65))
+                        }
+                    }
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Color.accentColor)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Color.accentColor.opacity(0.12), in: Capsule())
+                    .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .help(echo.label)
+                .contextMenu {
+                    Button("Open Idea") { open(echo.name) }
+                    Button("Remove from This Highlight", role: .destructive) { toggle(echo.name) }
+                }
+            }
+
+            ForEach(suggestions, id: \.self) { name in
+                Button {
+                    toggle(name)
+                } label: {
+                    Label(name, systemImage: "plus")
+                        .labelStyle(.titleAndIcon)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(Color.secondary.opacity(0.12), in: Capsule())
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .help("Add this idea")
+            }
+
+            Button {
+                picking = true
+            } label: {
+                Label(echoes.isEmpty ? "Add Idea" : "Idea", systemImage: "tag")
+                    .labelStyle(.titleAndIcon)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .contentShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .help("Add or remove ideas")
+            .popover(isPresented: $picking, arrowEdge: .bottom) {
+                IdeaPicker(all: allIdeas, attached: attached, toggle: toggle)
+            }
+        }
+    }
+}
+
+/// The small search-and-pick popover, in the style of Finder's tag picker.
+struct IdeaPicker: View {
+    let all: [String]
+    let attached: Set<String>
+    let toggle: (String) -> Void
+
+    @State private var query = ""
+    @State private var highlighted = 0
+    @FocusState private var focused: Bool
+
+    private var cleaned: String { IdeaParser.normalize(query) }
+
+    /// Rows to show: an optional "create" row first, then matching ideas.
+    private var rows: [PickerRow] {
+        let matches = cleaned.isEmpty ? all : all.filter { $0.contains(cleaned) }
+        var result: [PickerRow] = []
+        if !cleaned.isEmpty && !all.contains(cleaned) && !attached.contains(cleaned) {
+            result.append(PickerRow(name: cleaned, isNew: true))
+        }
+        result += matches.prefix(8).map { PickerRow(name: $0, isNew: false) }
+        return result
+    }
+
+    var body: some View {
+        let rows = self.rows
+
+        VStack(spacing: 0) {
+            TextField("Add or find an idea", text: $query)
+                .textFieldStyle(.plain)
+                .font(.system(size: 13))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .focused($focused)
+                .onSubmit { choose(rows) }
+                .onKeyPress(.downArrow) {
+                    highlighted = min(highlighted + 1, max(rows.count - 1, 0))
+                    return .handled
+                }
+                .onKeyPress(.upArrow) {
+                    highlighted = max(highlighted - 1, 0)
+                    return .handled
+                }
+                .onChange(of: query) { _, _ in highlighted = 0 }
+
+            Divider()
+
+            if rows.isEmpty {
+                Text(all.isEmpty ? "Type a name and press Return to create your first idea." : "No matching ideas.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(12)
+            } else {
+                VStack(spacing: 1) {
+                    ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
+                        Button {
+                            pick(row)
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: row.isNew ? "plus" : "tag")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 14)
+                                Text(row.isNew ? "Create “\(row.name)”" : row.name)
+                                    .font(.system(size: 13))
+                                    .lineLimit(1)
+                                Spacer(minLength: 8)
+                                if attached.contains(row.name) {
+                                    Image(systemName: "checkmark")
+                                        .font(.system(size: 11, weight: .semibold))
+                                        .foregroundStyle(Color.accentColor)
+                                }
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 5)
+                            .background(
+                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    .fill(index == highlighted ? Color.accentColor.opacity(0.16) : Color.clear)
+                            )
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .onHover { inside in
+                            if inside { highlighted = index }
+                        }
+                    }
+                }
+                .padding(6)
+            }
+        }
+        .frame(width: 250)
+        .onAppear { focused = true }
+    }
+
+    private func choose(_ rows: [PickerRow]) {
+        guard !rows.isEmpty else { return }
+        pick(rows[min(highlighted, rows.count - 1)])
+    }
+
+    private func pick(_ row: PickerRow) {
+        toggle(row.name)
+        query = ""
+        highlighted = 0
+    }
+}
+
+struct PickerRow: Identifiable {
+    let name: String
+    let isNew: Bool
+    var id: String { (isNew ? "new:" : "idea:") + name }
 }

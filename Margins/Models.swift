@@ -83,6 +83,8 @@ struct Highlight: Codable, Identifiable, Equatable {
     var note: String = ""
     var createdAt = Date()
     var done = false
+    /// Ideas attached with the idea picker. Hashtags typed in the note count as well.
+    var tags: [String] = []
 
     // PDF location
     var pdfPage: Int?
@@ -242,6 +244,7 @@ extension Highlight {
         note = try c.decodeIfPresent(String.self, forKey: .note) ?? ""
         createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
         done = try c.decodeIfPresent(Bool.self, forKey: .done) ?? false
+        tags = try c.decodeIfPresent([String].self, forKey: .tags) ?? []
         pdfPage = try c.decodeIfPresent(Int.self, forKey: .pdfPage)
         pdfRects = try c.decodeIfPresent([CGRect].self, forKey: .pdfRects)
         chapter = try c.decodeIfPresent(Int.self, forKey: .chapter)

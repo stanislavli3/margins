@@ -70,8 +70,17 @@ struct NotesPanel: View {
                                     note: noteBinding(item.id),
                                     focus: $focusedNote,
                                     echoes: echoes(for: item, in: ideaIndex),
-                                    suggestions: Array(recentIdeas.filter { !item.ideas.contains($0) }.prefix(6)),
+                                    allIdeas: recentIdeas,
                                     openIdea: { ideaSheet = IdeaRef(name: $0) },
+                                    toggleIdea: { name in
+                                        library.updateHighlight(item.id, in: bookID) { highlight in
+                                            if highlight.ideas.contains(name) {
+                                                highlight.removeIdea(name)
+                                            } else {
+                                                highlight.addIdea(name)
+                                            }
+                                        }
+                                    },
                                     select: {
                                         bridge.selectedHighlight = item.id
                                         bridge.jump?(item)
@@ -138,10 +147,9 @@ struct Echo: Identifiable {
     var id: String { name }
 
     var label: String {
-        if others == 0 { return "#\(name) · first passage" }
-        let passages = "\(others) more"
-        if otherBooks == 0 { return "#\(name) · \(passages) in this book" }
-        return "#\(name) · \(passages), \(otherBooks) other \(otherBooks == 1 ? "book" : "books")"
+        if others == 0 { return "The first passage under this idea. Click to open it." }
+        if otherBooks == 0 { return "\(others) more in this book. Click to see them." }
+        return "\(others) more, in \(otherBooks) other \(otherBooks == 1 ? "book" : "books"). Click to see them."
     }
 }
 
@@ -179,8 +187,9 @@ private struct HighlightRow: View {
     @Binding var note: String
     var focus: FocusState<UUID?>.Binding
     let echoes: [Echo]
-    let suggestions: [String]
+    let allIdeas: [String]
     let openIdea: (String) -> Void
+    let toggleIdea: (String) -> Void
     let select: () -> Void
     let recolor: (Nutrient) -> Void
     let delete: () -> Void
@@ -217,42 +226,13 @@ private struct HighlightRow: View {
                     .lineLimit(1...12)
                     .focused(focus, equals: item.id)
 
-                // Echoes: what else you've marked under the same ideas.
-                ForEach(echoes) { echo in
-                    Button {
-                        openIdea(echo.name)
-                    } label: {
-                        Label(echo.label, systemImage: "point.3.connected.trianglepath.dotted")
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(echo.others > 0 ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.secondary))
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .help("Show everything under #\(echo.name)")
-                }
-
-                // One-click ideas you've used before.
-                if selected && !suggestions.isEmpty {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 6) {
-                            ForEach(suggestions, id: \.self) { name in
-                                Button {
-                                    let trimmed = note.trimmingCharacters(in: .whitespaces)
-                                    note = trimmed.isEmpty ? "#\(name)" : "\(trimmed) #\(name)"
-                                } label: {
-                                    Text("#\(name)")
-                                        .font(.system(size: 11))
-                                        .foregroundStyle(.secondary)
-                                        .padding(.horizontal, 7)
-                                        .padding(.vertical, 3)
-                                        .background(.quaternary, in: Capsule())
-                                }
-                                .buttonStyle(.plain)
-                            }
-                        }
-                    }
-                }
+                IdeaTagsRow(
+                    echoes: echoes,
+                    allIdeas: allIdeas,
+                    showSuggestions: selected,
+                    toggle: toggleIdea,
+                    open: openIdea
+                )
             }
         }
         .padding(10)
